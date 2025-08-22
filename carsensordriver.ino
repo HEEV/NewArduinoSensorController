@@ -1,14 +1,15 @@
 #include <Servo.h>
-#include "cppQueue.h"
+#include <DS18B20.h>
 
-#define Q_IMPLEMENTATION FIFO  // First In, First Out
 
 unsigned int counter = 0;
 
-//throttle constants
+//throttle constants Not in use at the moment.
+/*
 Servo myservo;  //Creates instance of a servo. - DO NOT CHANGE
 int pos = 0;    //Initializes variable to store servo position at any given point in time (both values). - DO NOT CHANGE
 int potPos;     //Initializes variable to store the potentiometer position. - DO NOT CHANGE
+*/
 
 //Airspeed sensor variables
 float airOffset;  //Varibale to hold the 0-speed pressure
@@ -16,22 +17,29 @@ float airDiff;    //Difference between current air pressure and offset
 
 //wheel speed constants
 int wheelSpeedSensorPin = 2;
-int numMagnets = 3;
+int numMagnets = 1;
 float wheelRadius = 10.0f;  //wheel radius in inches
 int debounceTime = 10;      //debounce time in ms
-unsigned long magnetTimes[2] = { 0 };
 float circumference = 0;     //DO NOT MODIFY!!! calculated from radius
-float magRadius = 4.1875;    // inches
-float magCircumference = 0;  // inches
 
+// other wheelspeed variables
+volatile unsigned long magnetTimes[2] = { 0 }; // volatile modifier due to write in interrupt
+volatile unsigned long deltaTime = 0;
+volatile unsigned long curTime = 0;
+volatile float distTraveled = 0;
 float currSpeed = 0;
+float prevSpeed = 0;
+float pulseDist = 0; // DO NOT MODIFY calculated from circumference below
 
-// Rolling Average Variables
-// Initialize teh queue to hold our rolling values
-const int Q_SIZE = 12;  // Size of our queue, deciding our rolling avg
-int currAvgCount = 7;
-cppQueue qRollingVals(sizeof(float), Q_SIZE, Q_IMPLEMENTATION);
-
+// Temperature Sensor variables
+DS18B20 ds(3);
+uint8_t engineAddr[8] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+uint8_t radAddr[8]    = { 40, 208, 235, 135, 0, 202, 38, 130 };
+// Index 0 is engine temp, index 1 is rad temp
+int cacheTTL[] = {50, 50};
+int cacheLife[] = {0, 0};
+float radTemp = 0.0f;
+float engTemp = 0.0f;
 
 
 struct __attribute__((packed)) DataPacket {
@@ -41,22 +49,25 @@ struct __attribute__((packed)) DataPacket {
 };
 
 void setup() {
-  // Initialize queue with 5 values
-  float baseRec = 0.0f;
-  for (int i = 0; i < Q_SIZE; i++) {
-    qRollingVals.push(&baseRec);
-  }
-
   Serial.begin(9600);  //Sets frequency value. - DO NOT CHANGE
-  myservo.attach(9);   //Attaches the pin 9 input (physical servo) to the servo object. - DO NOT CHANGE
+  // not in use at the moment
+  /*
+  //myservo.attach(9);   //Attaches the pin 9 input (physical servo) to the servo object. - DO NOT CHANGE 
   pinMode(A0, INPUT);  //Attaches the A0 input (physical potentiometer) to the board. - DO NOT CHANGE
-  pinMode(wheelSpeedSensorPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(2), handleMagnet, FALLING);
+  */
+  pinMode(wheelSpeedSensorPin, INPUT_PULLUP); // Wheelspeed, pin 2
+  attachInterrupt(digitalPinToInterrupt(2), handleMagnet, FALLING); // wheelspeed interrupt
   circumference = 2 * wheelRadius * PI;   // inches
-  magCircumference = 2 * magRadius * PI;  // inches
-  pinMode(A7, INPUT);
+  pulseDist = circumference / numMagnets;
   pinMode(12, OUTPUT);
-  pinMode(6, INPUT);
+  pinMode(6, INPUT); 
+  pinMode(4, INPUT_PULLUP);   // user input 1
+  pinMode(5, INPUT_PULLUP);   // user input 2
+  pinMode(7, INPUT);   // Karch Selection Pin
+  pinMode(8, INPUT);   // Sting Selection Pin
+  pinMode(10, OUTPUT); // Rad Fan Signal Out
+  pinMode(11, OUTPUT); // Water Pump Signal Out
+  pinMode(A7, INPUT);  // Battery Voltage
   pinMode(A2, INPUT);  //Attach the A2 pin on the arduino to the OUT pin on the airspeed module
   airOffset = 0;       //Assign to 0 for when it resets
   for (int i = 0; i < 50; i++) {
@@ -67,41 +78,49 @@ void setup() {
 
 bool isOn = false;
 void loop() {
+  // Update speed values
+  prevSpeed = currSpeed;
   currSpeed = getSpeed();
-  // firstLen = !firstLen;
-  Serial.println(String(batteryLevel()) + ", " + String(currSpeed));  // return global speed instead of calculating here
 
-  // set averaging size
-  if (currSpeed > 10.0f) {
-    currAvgCount = 10;
-  }
-  else if (currSpeed > 20.0f) {
-    currAvgCount = 12;
-  }
-  else { 
-    currAvgCount = 7;
+  // Update temperature cache values
+  updateEngineTemp();
+  updateRadiatorTemp();
+
+  if ((currSpeed != prevSpeed && currSpeed > 0.25) || currSpeed == 0 ) {// 0.25 mph is error bandwidth for noise 
+    Serial.println(String(batteryLevel()) + ", " + String(currSpeed) + ", " + String(distTraveled) + ", " + String(1) + ", " 
+    + String(pollUserInput(1)) + ", " + String(pollUserInput(2)) + ", " + String(engTemp) + ", " + String(radTemp));
   }
 
   delay(50);
+  // comment this out on deployment
+  /*
   digitalWrite(LED_BUILTIN, isOn ? HIGH : LOW);
   isOn = !isOn;
+  /**/
 }
 
 void handleMagnet() {
-  unsigned long curTime = millis();
+  curTime = millis();
   if (curTime - magnetTimes[0] > debounceTime) {
     magnetTimes[1] = magnetTimes[0];
     magnetTimes[0] = curTime;
-  }
 
-  //currSpeed = getSpeed();  // Handle the speed calc on the pulse instead
+    // use the retreived magnett timings to get delta t on the pulse
+    deltaTime = magnetTimes[0] - magnetTimes[1];
+
+    // use the known pulse distance travel to find total distance in feet
+    distTraveled += pulseDist / 12;
+  }
 }
 
 float getSpeed() {
   float mph = 0.0f;
-  if (millis() - magnetTimes[0] < 600 && magnetTimes[0] != 0) {
+
+  // Disable interrupts on reads of shared variables for atomicity
+  //noInterrupts();
+
+  if (millis() - magnetTimes[0] < 3800 && magnetTimes[0] != 0) {
     // Calculating our speed based on the magnet timings
-    // TODO: fix this equation for current conditions of the magnets
     /*
    current magnet setup (X is a magnet)
       ***********
@@ -112,37 +131,18 @@ float getSpeed() {
      *           *
       ***********
     */
-    //(((float)circumference / numMagnets) / (magnetTimes[0] - magnetTimes[1])) * 1000.0f
-    // (((float)arcLengths[firstLen] / numMagnets) / (magnetTimes[0] - magnetTimes[1])) * 1000.0f
-    float inps = (((float)circumference / numMagnets) / (magnetTimes[0] - magnetTimes[1])) * 1000.0f;
+
+    // Calculate speed in inches per second
+    float inps = (((float)circumference / numMagnets) / (deltaTime)) * 1000.0f;
+
+    // Done accessing shared variables, re-enable interrupts
+    //interrupts();
+
     // convert the speed we calculated from Inches/Sec to Miles/Hr
     mph = ((inps / 12.0f) / 5280.0f) * 3600.0f;
   }
 
-  // Push the newest velocity, remove the oldest value
-  float rec;
-  qRollingVals.pop(&rec);
-  qRollingVals.push(&mph);
-
-  // Get our rolling average
-  mph = calculateRollingAvg();
-
   return mph;
-}
-
-float calculateRollingAvg() {
-  float rec = 0.0f;
-  float sum = 0.0f;
-
-  // Get all of our values and sum them
-  for (int i = 0; i < currAvgCount; i++) {
-    // Index i + (Q_SIZE - CurrAvgCount), moves the index by the offset into the queue we are looking.
-    qRollingVals.peekIdx(&rec, i + (Q_SIZE - currAvgCount));
-    sum += rec;
-  }
-
-  // Return the average of our rolling values
-  return sum / currAvgCount;
 }
 
 
@@ -150,4 +150,55 @@ float batteryLevel() {
   float voltageRead = analogRead(7);
   // Vbat = Vread * R2 / (R1 + R2)
   return voltageRead * 680.0f / (1000.0f + 680.0f);
+}
+
+void updateEngineTemp() {
+  if (ds.select(engineAddr)){
+    if (cacheLife[0] > cacheTTL[0]) {
+      engTemp = ds.getTempF();
+      cacheLife[0] = 0;
+    }
+    else { cacheLife[0]++; }
+  }
+}
+
+void updateRadiatorTemp() {
+  if (ds.select(radAddr)){
+    if (cacheLife[1] > cacheTTL[1]) {
+      radTemp = ds.getTempF();
+      cacheLife[1] = 0;
+    }
+    else { cacheLife[1]++; }
+  }
+}
+
+bool pollUserInput(int index) {
+  bool data;
+  switch (index) {
+    case 1:
+      data = !(bool)digitalRead(4);
+      break;
+    case 2:
+      data = !(bool)digitalRead(5);
+      break;
+    default:
+      data = false;
+  }
+
+  return data;
+}
+
+int getCarId() {
+  int karch = digitalRead(7);
+  int sting = digitalRead(8);
+
+  if (karch == 1) {
+    return 1;
+  }
+  else if (sting == 1) {
+    return 2;
+  }
+  else {
+    return 1;
+  }
 }
