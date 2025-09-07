@@ -2,6 +2,14 @@
 #include <DS18B20.h>
 
 
+//wheel speed constants
+#define wheelSpeedSensorPin 2
+#define numMagnets 1
+#define debounceTime 10 // in ms
+#define wheelRadius 10.0 // in in
+#define circumference (2 * wheelRadius * PI) // in in 
+#define pulseDist (circumference / numMagnets) 
+
 unsigned int counter = 0;
 
 //throttle constants Not in use at the moment.
@@ -12,15 +20,9 @@ int potPos;     //Initializes variable to store the potentiometer position. - DO
 */
 
 //Airspeed sensor variables
-float airOffset;  //Varibale to hold the 0-speed pressure
-float airDiff;    //Difference between current air pressure and offset
+float airOffset = 0.0f;  //Varibale to hold the 0-speed pressure
+//float airDiff;    //Difference between current air pressure and offset
 
-//wheel speed constants
-int wheelSpeedSensorPin = 2;
-int numMagnets = 1;
-float wheelRadius = 10.0f;  //wheel radius in inches
-int debounceTime = 10;      //debounce time in ms
-float circumference = 0;     //DO NOT MODIFY!!! calculated from radius
 
 // other wheelspeed variables
 volatile unsigned long magnetTimes[2] = { 0 }; // volatile modifier due to write in interrupt
@@ -29,24 +31,23 @@ volatile unsigned long curTime = 0;
 volatile float distTraveled = 0;
 float currSpeed = 0;
 float prevSpeed = 0;
-float pulseDist = 0; // DO NOT MODIFY calculated from circumference below
 
 // Temperature Sensor variables
 DS18B20 ds(3);
-uint8_t engineAddr[8] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-uint8_t radAddr[8]    = { 40, 208, 235, 135, 0, 202, 38, 130 };
+const uint8_t engineTempAddr[8] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+const uint8_t radTempAddr[8]    = { 0x28, 0xD0, 0xEB, 0x87, 0x00, 0xCA, 0x26, 0x82 };
+
 // Index 0 is engine temp, index 1 is rad temp
-int cacheTTL[] = {50, 50};
+const int cacheTTL[] = {50, 50};
 int cacheLife[] = {0, 0};
-float radTemp = 0.0f;
-float engTemp = 0.0f;
 
+// Honestly not sure wth this is
 
-struct __attribute__((packed)) DataPacket {
-  int sensor;
-  float data;
-  int64_t time;
-};
+// struct __attribute__((packed)) DataPacket {
+//   int sensor;
+//   float data;
+//   int64_t time;
+// };
 
 void setup() {
   Serial.begin(9600);  //Sets frequency value. - DO NOT CHANGE
@@ -57,8 +58,6 @@ void setup() {
   */
   pinMode(wheelSpeedSensorPin, INPUT_PULLUP); // Wheelspeed, pin 2
   attachInterrupt(digitalPinToInterrupt(2), handleMagnet, FALLING); // wheelspeed interrupt
-  circumference = 2 * wheelRadius * PI;   // inches
-  pulseDist = circumference / numMagnets;
   pinMode(12, OUTPUT);
   pinMode(6, INPUT); 
   pinMode(4, INPUT_PULLUP);   // user input 1
@@ -69,22 +68,21 @@ void setup() {
   pinMode(11, OUTPUT); // Water Pump Signal Out
   pinMode(A7, INPUT);  // Battery Voltage
   pinMode(A2, INPUT);  //Attach the A2 pin on the arduino to the OUT pin on the airspeed module
-  airOffset = 0;       //Assign to 0 for when it resets
   for (int i = 0; i < 50; i++) {
     airOffset += analogRead(A2);  //Average 50 readings to smooth out the data
   }
   airOffset /= 50;  //Divide by 50 to make it the average
 }
 
-bool isOn = false;
+//bool isOn = false;
 void loop() {
   // Update speed values
   prevSpeed = currSpeed;
   currSpeed = getSpeed();
 
   // Update temperature cache values
-  updateEngineTemp();
-  updateRadiatorTemp();
+  float engTemp = updateEngineTemp();
+  float radTemp = updateRadiatorTemp();
 
   if ((currSpeed != prevSpeed && currSpeed > 0.25) || currSpeed == 0 ) {// 0.25 mph is error bandwidth for noise 
     Serial.println(String(batteryLevel()) + ", " + String(currSpeed) + ", " + String(distTraveled) + ", " + String(1) + ", " 
@@ -114,15 +112,14 @@ void handleMagnet() {
 }
 
 float getSpeed() {
-  float mph = 0.0f;
-
   // Disable interrupts on reads of shared variables for atomicity
-  //noInterrupts();
+  // noInterrupts();
 
   if (millis() - magnetTimes[0] < 3800 && magnetTimes[0] != 0) {
     // Calculating our speed based on the magnet timings
+
     /*
-   current magnet setup (X is a magnet)
+    current magnet setup (X is a magnet)
       ***********
      *           * 
      *     X     *
@@ -133,16 +130,16 @@ float getSpeed() {
     */
 
     // Calculate speed in inches per second
-    float inps = (((float)circumference / numMagnets) / (deltaTime)) * 1000.0f;
+    float inps = ((circumference / numMagnets) / deltaTime) * 1000.0f;
 
     // Done accessing shared variables, re-enable interrupts
-    //interrupts();
+    // interrupts();
 
     // convert the speed we calculated from Inches/Sec to Miles/Hr
-    mph = ((inps / 12.0f) / 5280.0f) * 3600.0f;
+    return ((inps / 12.0f) / 5280.0f) * 3600.0f;
   }
 
-  return mph;
+  return 0.0;
 }
 
 
@@ -152,23 +149,26 @@ float batteryLevel() {
   return voltageRead * 680.0f / (1000.0f + 680.0f);
 }
 
-void updateEngineTemp() {
-  if (ds.select(engineAddr)){
+float updateEngineTemp() {
+  if (ds.select(engineTempAddr)){
     if (cacheLife[0] > cacheTTL[0]) {
-      engTemp = ds.getTempF();
       cacheLife[0] = 0;
+      return ds.getTempF();
+    } else { 
+      cacheLife[0]++; 
     }
-    else { cacheLife[0]++; }
   }
 }
 
-void updateRadiatorTemp() {
-  if (ds.select(radAddr)){
+float updateRadiatorTemp() {
+  if (ds.select(radTempAddr)){
     if (cacheLife[1] > cacheTTL[1]) {
-      radTemp = ds.getTempF();
       cacheLife[1] = 0;
+      return ds.getTempF();
     }
-    else { cacheLife[1]++; }
+    else { 
+      cacheLife[1]++; 
+    }
   }
 }
 
