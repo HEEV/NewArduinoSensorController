@@ -1,6 +1,4 @@
-#include <Servo.h>
 #include <DS18B20.h>
-
 
 //wheel speed constants
 #define wheelSpeedSensorPin 2
@@ -10,20 +8,6 @@
 #define circumference (2 * wheelRadius * PI) // in in 
 #define pulseDist (circumference / numMagnets) 
 
-unsigned int counter = 0;
-
-//throttle constants Not in use at the moment.
-/*
-Servo myservo;  //Creates instance of a servo. - DO NOT CHANGE
-int pos = 0;    //Initializes variable to store servo position at any given point in time (both values). - DO NOT CHANGE
-int potPos;     //Initializes variable to store the potentiometer position. - DO NOT CHANGE
-*/
-
-//Airspeed sensor variables
-float airOffset = 0.0f;  //Varibale to hold the 0-speed pressure
-//float airDiff;    //Difference between current air pressure and offset
-
-
 // other wheelspeed variables
 volatile unsigned long magnetTimes[2] = { 0 }; // volatile modifier due to write in interrupt
 volatile unsigned long deltaTime = 0;
@@ -31,6 +15,10 @@ volatile unsigned long curTime = 0;
 volatile float distTraveled = 0;
 float currSpeed = 0;
 float prevSpeed = 0;
+
+// Airspeed sensor variables
+float airOffset = 0.0f;  // Variable to hold the 0-speed pressure
+//float airDiff;    // Difference between current air pressure and offset
 
 // Temperature Sensor variables
 DS18B20 ds(3);
@@ -41,31 +29,41 @@ const uint8_t radTempAddr[8]    = { 0x28, 0xD0, 0xEB, 0x87, 0x00, 0xCA, 0x26, 0x
 const int cacheTTL[] = {50, 50};
 int cacheLife[] = {0, 0};
 
-// Honestly not sure wth this is
+// This is a struct with all padding bytes removed, which is used for efficient sending of data over the serial bus.
+// unsigned char = 1 byte
+// unsigned int  = 2 bytes
+// float         = 4 bytes
 
-// struct __attribute__((packed)) DataPacket {
-//   int sensor;
-//   float data;
-//   int64_t time;
-// };
+struct __attribute__((packed)) DataPacket {
+  // Hardcoded sensors/values (common across vehicles)
+  float         speed;
+  float         distaceTraveled;
+  float         airOffset;
+  float         engineTemp;
+  float         radTemp;
+  // Digital Channels
+  unsigned char channel0;
+  unsigned char channel1;
+  unsigned char channel2;
+  unsigned char channel3;
+  unsigned char channel4;
+  // Analog Channels
+  unsigned int  channelA0; // 10-bit ADC
+};
 
 void setup() {
   Serial.begin(9600);  //Sets frequency value. - DO NOT CHANGE
-  // not in use at the moment
-  /*
-  //myservo.attach(9);   //Attaches the pin 9 input (physical servo) to the servo object. - DO NOT CHANGE 
-  pinMode(A0, INPUT);  //Attaches the A0 input (physical potentiometer) to the board. - DO NOT CHANGE
-  */
+
   pinMode(wheelSpeedSensorPin, INPUT_PULLUP); // Wheelspeed, pin 2
   attachInterrupt(digitalPinToInterrupt(2), handleMagnet, FALLING); // wheelspeed interrupt
-  pinMode(12, OUTPUT);
-  pinMode(6, INPUT); 
   pinMode(4, INPUT_PULLUP);   // user input 1
   pinMode(5, INPUT_PULLUP);   // user input 2
-  pinMode(7, INPUT);   // Karch Selection Pin
-  pinMode(8, INPUT);   // Sting Selection Pin
+  pinMode(6, INPUT);
+  pinMode(7, INPUT);
+  pinMode(8, INPUT);
   pinMode(10, OUTPUT); // Rad Fan Signal Out
   pinMode(11, OUTPUT); // Water Pump Signal Out
+  pinMode(12, OUTPUT);
   pinMode(A7, INPUT);  // Battery Voltage
   pinMode(A2, INPUT);  //Attach the A2 pin on the arduino to the OUT pin on the airspeed module
   for (int i = 0; i < 50; i++) {
@@ -84,12 +82,19 @@ void loop() {
   float engTemp = updateEngineTemp();
   float radTemp = updateRadiatorTemp();
 
+  struct DataPacket packet = {
+    currSpeed, distTraveled, ((float)analogRead(2) - airOffset), engTemp, radTemp, 
+    (unsigned char)digitalRead(4), (unsigned char)digitalRead(5), (unsigned char)digitalRead(6), 
+    (unsigned char)digitalRead(7), (unsigned char)digitalRead(8), analogRead(7)
+  };
+
+  // Output all data channels to the bus, whether they are connected or not. Parsing happens RPi side.
+  // The write call casts the packet to a pointer to a byte, which write then parses through.
   if ((currSpeed != prevSpeed && currSpeed > 0.25) || currSpeed == 0 ) {// 0.25 mph is error bandwidth for noise 
-    Serial.println(String(batteryLevel()) + ", " + String(currSpeed) + ", " + String(distTraveled) + ", " + String(1) + ", " 
-    + String(pollUserInput(1)) + ", " + String(pollUserInput(2)) + ", " + String(engTemp) + ", " + String(radTemp));
+    Serial.write((uint8_t*)&packet, sizeof(packet));
   }
 
-  delay(50);
+  delay(50); 
   // comment this out on deployment
   /*
   digitalWrite(LED_BUILTIN, isOn ? HIGH : LOW);
@@ -103,10 +108,10 @@ void handleMagnet() {
     magnetTimes[1] = magnetTimes[0];
     magnetTimes[0] = curTime;
 
-    // use the retreived magnett timings to get delta t on the pulse
+    // use the retrieved magnet timings to get delta t on the pulse
     deltaTime = magnetTimes[0] - magnetTimes[1];
 
-    // use the known pulse distance travel to find total distance in feet
+    // use the known pulse distance traveled to find total distance in feet
     distTraveled += pulseDist / 12;
   }
 }
@@ -121,10 +126,10 @@ float getSpeed() {
     /*
     current magnet setup (X is a magnet)
       ***********
-     *           * 
-     *     X     *
+     *     X     * 
+     *           *
      *     O     *
-     *   X   X   *
+     *           *
      *           *
       ***********
     */
@@ -142,12 +147,7 @@ float getSpeed() {
   return 0.0;
 }
 
-
-float batteryLevel() {
-  float voltageRead = analogRead(7);
-  // Vbat = Vread * R2 / (R1 + R2)
-  return voltageRead * 680.0f / (1000.0f + 680.0f);
-}
+// Get Temperatures, but only every so often because these sensors are slow.
 
 float updateEngineTemp() {
   if (ds.select(engineTempAddr)){
@@ -169,36 +169,5 @@ float updateRadiatorTemp() {
     else { 
       cacheLife[1]++; 
     }
-  }
-}
-
-bool pollUserInput(int index) {
-  bool data;
-  switch (index) {
-    case 1:
-      data = !(bool)digitalRead(4);
-      break;
-    case 2:
-      data = !(bool)digitalRead(5);
-      break;
-    default:
-      data = false;
-  }
-
-  return data;
-}
-
-int getCarId() {
-  int karch = digitalRead(7);
-  int sting = digitalRead(8);
-
-  if (karch == 1) {
-    return 1;
-  }
-  else if (sting == 1) {
-    return 2;
-  }
-  else {
-    return 1;
   }
 }
