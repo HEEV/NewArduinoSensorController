@@ -37,8 +37,7 @@ int cacheLife[] = {0, 0};
 struct __attribute__((packed)) DataPacket {
   // Hardcoded sensors/values (common across vehicles)
   float         speed;
-  float         distaceTraveled;
-  float         airOffset;
+  float         airspeed;
   float         engineTemp;
   float         radTemp;
   // Digital Channels
@@ -66,6 +65,8 @@ void setup() {
   pinMode(12, OUTPUT);
   pinMode(A7, INPUT);  // Battery Voltage
   pinMode(A2, INPUT);  //Attach the A2 pin on the arduino to the OUT pin on the airspeed module
+
+  // Zero out the wind speed measurements on startup
   for (int i = 0; i < 50; i++) {
     airOffset += analogRead(A2);  //Average 50 readings to smooth out the data
   }
@@ -83,7 +84,7 @@ void loop() {
   float radTemp = updateRadiatorTemp();
 
   struct DataPacket packet = {
-    currSpeed, distTraveled, ((float)analogRead(2) - airOffset), engTemp, radTemp, 
+    currSpeed, ((float)analogRead(2) - airOffset), engTemp, radTemp, 
     (unsigned char)digitalRead(4), (unsigned char)digitalRead(5), (unsigned char)digitalRead(6), 
     (unsigned char)digitalRead(7), (unsigned char)digitalRead(8), analogRead(7)
   };
@@ -110,9 +111,6 @@ void handleMagnet() {
 
     // use the retrieved magnet timings to get delta t on the pulse
     deltaTime = magnetTimes[0] - magnetTimes[1];
-
-    // use the known pulse distance traveled to find total distance in feet
-    distTraveled += pulseDist / 12;
   }
 }
 
