@@ -55,15 +55,15 @@ void setup() {
 
   pinMode(wheelSpeedSensorPin, INPUT_PULLUP); // Wheelspeed, pin 2
   attachInterrupt(digitalPinToInterrupt(2), handleMagnet, FALLING); // wheelspeed interrupt
-  pinMode(4, INPUT_PULLUP);   // user input 1
-  pinMode(5, INPUT_PULLUP);   // user input 2
+  pinMode(4, INPUT_PULLUP);
+  pinMode(5, INPUT_PULLUP);
   pinMode(6, INPUT);
   pinMode(7, INPUT);
   pinMode(8, INPUT);
   pinMode(10, OUTPUT); // Rad Fan Signal Out
   pinMode(11, OUTPUT); // Water Pump Signal Out
   pinMode(12, OUTPUT);
-  pinMode(A7, INPUT);  // Battery Voltage
+  pinMode(A7, INPUT);
   pinMode(A2, INPUT);  //Attach the A2 pin on the arduino to the OUT pin on the airspeed module
 
   // Zero out the wind speed measurements on startup
@@ -73,7 +73,6 @@ void setup() {
   airOffset /= 50;  //Divide by 50 to make it the average
 }
 
-//bool isOn = false;
 void loop() {
   // Update speed values
   prevSpeed = currSpeed;
@@ -96,11 +95,6 @@ void loop() {
   }
 
   delay(50); 
-  // comment this out on deployment
-  /*
-  digitalWrite(LED_BUILTIN, isOn ? HIGH : LOW);
-  isOn = !isOn;
-  /**/
 }
 
 void handleMagnet() {
